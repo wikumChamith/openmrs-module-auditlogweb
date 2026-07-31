@@ -40,6 +40,22 @@ public class AuditBackfillService {
 	private final AuditBackfillDao auditBackfillDao;
 	
 	/**
+	 * Creates any missing Envers audit tables if Envers is enabled; a no-op when all tables already
+	 * exist. Not gated behind a global property: the tables are required for the module to function at
+	 * all, creation is idempotent, and only tables that do not exist are touched.
+	 */
+	public void createMissingAuditTablesIfEnabled() {
+		if (!EnversUtils.isEnversEnabled()) {
+			log.info("Envers is disabled (hibernate.integration.envers.enabled != true); skipping audit table creation.");
+			return;
+		}
+		int created = auditBackfillDao.createMissingAuditTables();
+		if (created > 0) {
+			log.warn("Created {} missing Envers audit table(s).", created);
+		}
+	}
+	
+	/**
 	 * Runs the backfill if Envers is enabled, the feature flag is on, and it has not already run.
 	 */
 	public void backfillExistingDataIfEnabled() {

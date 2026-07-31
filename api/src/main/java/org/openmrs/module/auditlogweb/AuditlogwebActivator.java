@@ -25,9 +25,16 @@ public class AuditlogwebActivator extends BaseModuleActivator {
 	@Override
 	public void started() {
 		log.info("Started Auditlogweb");
+		AuditBackfillService backfillService = Context.getRegisteredComponent("auditlogweb.auditBackfillService",
+		    AuditBackfillService.class);
 		try {
-			Context.getRegisteredComponent("auditlogweb.auditBackfillService", AuditBackfillService.class)
-			        .backfillExistingDataIfEnabled();
+			backfillService.createMissingAuditTablesIfEnabled();
+		}
+		catch (Exception e) {
+			log.error("Creation of missing Envers audit tables failed", e);
+		}
+		try {
+			backfillService.backfillExistingDataIfEnabled();
 		}
 		catch (Exception e) {
 			log.error("One-time audit backfill of existing data failed", e);

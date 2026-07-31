@@ -57,6 +57,29 @@ class AuditBackfillServiceTest {
 	}
 	
 	@Test
+	void shouldSkipAuditTableCreationWhenEnversDisabled() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(false);
+			
+			service.createMissingAuditTablesIfEnabled();
+			
+			verifyNoInteractions(auditBackfillDao);
+		}
+	}
+	
+	@Test
+	void shouldCreateMissingAuditTablesWhenEnversEnabled() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(true);
+			when(auditBackfillDao.createMissingAuditTables()).thenReturn(3);
+			
+			service.createMissingAuditTablesIfEnabled();
+			
+			verify(auditBackfillDao).createMissingAuditTables();
+		}
+	}
+	
+	@Test
 	void shouldSkipBackfillWhenFeatureNotEnabled() {
 		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class);
 		        MockedStatic<Context> context = mockStatic(Context.class)) {

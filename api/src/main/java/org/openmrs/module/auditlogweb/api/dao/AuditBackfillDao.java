@@ -10,16 +10,20 @@
 package org.openmrs.module.auditlogweb.api.dao;
 
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.Transaction;
+import org.hibernate.dialect.Dialect;
+import org.hibernate.dialect.identity.IdentityColumnSupport;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import org.hibernate.envers.AuditTable;
 import org.hibernate.envers.Audited;
+import org.hibernate.id.IdentityGenerator;
+import org.hibernate.mapping.Column;
 import org.hibernate.metamodel.spi.MetamodelImplementor;
 import org.hibernate.persister.entity.AbstractEntityPersister;
 import org.hibernate.persister.entity.EntityPersister;
-import org.openmrs.api.context.Context;
 import org.openmrs.api.db.hibernate.envers.OpenmrsRevisionEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +34,8 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -41,7 +47,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 
@@ -66,9 +71,9 @@ public class AuditBackfillDao {
 	public List<TableMapping> resolveAuditedTableMappings() {
 		SessionFactoryImplementor sfi = sessionFactory.unwrap(SessionFactoryImplementor.class);
 		MetamodelImplementor metamodel = sfi.getMetamodel();
-		Properties runtimeProperties = Context.getRuntimeProperties();
-		String prefix = runtimeProperties.getProperty("org.hibernate.envers.audit_table_prefix", "");
-		String suffix = runtimeProperties.getProperty("org.hibernate.envers.audit_table_suffix", "_audit");
+		String[] affixes = auditTableAffixes(sfi);
+		String prefix = affixes[0];
+		String suffix = affixes[1];
 		
 		List<TableMapping> result = new ArrayList<>();
 		Set<String> seenAuditTables = new LinkedHashSet<>();
@@ -115,6 +120,199 @@ public class AuditBackfillDao {
 			return session.doReturningWork(
 			    connection -> orderParentsBeforeChildren(mappings, readAuditTableParents(mappings, connection)));
 		}
+	}
+	
+	/**
+	 * Creates the Envers revision table and any missing audit tables; without them every audited write
+	 * fails. Idempotent: only tables that do not exist yet are created, each in its own try/catch so
+	 * one failure does not stop the rest.
+	 *
+	 * @return the number of tables created
+	 */
+	public int createMissingAuditTables() {
+		try (Session session = sessionFactory.openSession()) {
+			return session.doReturningWork(connection -> {
+				DatabaseMetaData metaData = connection.getMetaData();
+				String catalog = connection.getCatalog();
+				String quote = identifierQuote(metaData);
+				Set<String> existingTables = readExistingTableNames(metaData, catalog);
+				
+				SessionFactoryImplementor sfi = sessionFactory.unwrap(SessionFactoryImplementor.class);
+				Dialect dialect = sfi.getJdbcServices().getDialect();
+				
+				int created = createRevisionTableIfMissing(connection, sfi, dialect, existingTables, quote);
+				created += createAuditTablesIfMissing(connection, metaData, catalog, dialect, existingTables, quote);
+				return created;
+			});
+		}
+	}
+	
+	/**
+	 * Creates the revision table (revision_entity) if it is missing, deriving its DDL from the
+	 * {@link OpenmrsRevisionEntity} persister so names and types follow core's actual mapping.
+	 *
+	 * @return 1 if the table was created, 0 otherwise
+	 */
+	private int createRevisionTableIfMissing(Connection connection, SessionFactoryImplementor sfi, Dialect dialect,
+	        Set<String> existingTables, String quote) {
+		AbstractEntityPersister persister = findRevisionEntityPersister(sfi);
+		if (persister == null) {
+			log.warn("Could not locate the Envers revision entity in the metamodel; skipping revision table creation.");
+			return 0;
+		}
+		String tableName = unqualifiedTableName(persister.getTableName());
+		if (existingTables.contains(tableName.toLowerCase(Locale.ROOT))) {
+			return 0;
+		}
+		try {
+			String idColumn = persister.getIdentifierColumnNames()[0];
+			String idColumnDdl = revisionIdColumnDdl(persister, dialect, sfi);
+			
+			List<ColumnDefinition> propertyColumns = new ArrayList<>();
+			String[] propertyNames = persister.getPropertyNames();
+			boolean[] nullability = persister.getPropertyNullability();
+			for (int i = 0; i < propertyNames.length; i++) {
+				String column = persister.getPropertyColumnNames(i)[0];
+				int sqlType = persister.getPropertyTypes()[i].sqlTypes(sfi)[0];
+				String typeDdl = dialect.getTypeName(sqlType, Column.DEFAULT_LENGTH, Column.DEFAULT_PRECISION,
+				    Column.DEFAULT_SCALE);
+				propertyColumns.add(new ColumnDefinition(column, typeDdl, nullability[i]));
+			}
+			
+			String sql = buildCreateRevisionTableSql(tableName, idColumn, idColumnDdl, propertyColumns, quote);
+			try (Statement statement = connection.createStatement()) {
+				statement.execute(sql);
+			}
+			existingTables.add(tableName.toLowerCase(Locale.ROOT));
+			log.warn("Created Envers revision table {}.", tableName);
+			return 1;
+		}
+		catch (Exception e) {
+			log.warn("Could not create Envers revision table {}: {}", tableName, e.getMessage());
+			return 0;
+		}
+	}
+	
+	private AbstractEntityPersister findRevisionEntityPersister(SessionFactoryImplementor sfi) {
+		for (EntityPersister persister : sfi.getMetamodel().entityPersisters().values()) {
+			if (persister instanceof AbstractEntityPersister
+			        && OpenmrsRevisionEntity.class.equals(persister.getMappedClass())) {
+				return (AbstractEntityPersister) persister;
+			}
+		}
+		return null;
+	}
+	
+	/**
+	 * DDL for the revision id column: identity/auto-increment when the mapping uses an identity
+	 * generator (the MySQL case), a plain NOT NULL column otherwise.
+	 */
+	private String revisionIdColumnDdl(AbstractEntityPersister persister, Dialect dialect, SessionFactoryImplementor sfi) {
+		int idSqlType = persister.getIdentifierType().sqlTypes(sfi)[0];
+		if (persister.getIdentifierGenerator() instanceof IdentityGenerator) {
+			IdentityColumnSupport identity = dialect.getIdentityColumnSupport();
+			if (identity.hasDataTypeInIdentityColumn()) {
+				return dialect.getTypeName(idSqlType) + " " + identity.getIdentityColumnString(idSqlType);
+			}
+			return identity.getIdentityColumnString(idSqlType);
+		}
+		return dialect.getTypeName(idSqlType) + " not null";
+	}
+	
+	/**
+	 * Creates every missing audit table whose base table exists, cloning the base table's columns from
+	 * JDBC metadata.
+	 *
+	 * @return the number of audit tables created
+	 */
+	private int createAuditTablesIfMissing(Connection connection, DatabaseMetaData metaData, String catalog, Dialect dialect,
+	        Set<String> existingTables, String quote) {
+		String revColumnType = dialect.getTypeName(Types.INTEGER);
+		String revTypeColumnType = dialect.getTypeName(Types.TINYINT);
+		
+		int created = 0;
+		for (TableMapping mapping : resolveAllAuditTableMappings()) {
+			if (existingTables.contains(mapping.auditTable.toLowerCase(Locale.ROOT))) {
+				continue;
+			}
+			if (!existingTables.contains(mapping.baseTable.toLowerCase(Locale.ROOT))) {
+				log.warn("Base table {} does not exist; skipping creation of audit table {}.", mapping.baseTable,
+				    mapping.auditTable);
+				continue;
+			}
+			try {
+				List<ColumnDefinition> baseColumns = readColumnDefinitions(metaData, catalog, mapping.baseTable);
+				List<String> pkColumns = getPrimaryKeyColumns(metaData, catalog, mapping.baseTable);
+				String sql = buildCreateAuditTableSql(mapping, baseColumns, pkColumns, revColumnType, revTypeColumnType,
+				    quote);
+				try (Statement statement = connection.createStatement()) {
+					statement.execute(sql);
+				}
+				existingTables.add(mapping.auditTable.toLowerCase(Locale.ROOT));
+				created++;
+				log.info("Created Envers audit table {}.", mapping.auditTable);
+			}
+			catch (Exception e) {
+				log.warn("Could not create audit table {}: {}", mapping.auditTable, e.getMessage());
+			}
+		}
+		return created;
+	}
+	
+	/**
+	 * All base/audit table pairs Envers writes to: the {@code @Audited} entities from
+	 * {@link #resolveAuditedTableMappings()} plus the dynamic audit entities Envers registers for
+	 * collection/join middle tables (e.g. role_privilege), which the annotation scan cannot see.
+	 */
+	public List<TableMapping> resolveAllAuditTableMappings() {
+		SessionFactoryImplementor sfi = sessionFactory.unwrap(SessionFactoryImplementor.class);
+		List<TableMapping> mappings = new ArrayList<>(resolveAuditedTableMappings());
+		
+		Set<String> seenAuditTables = new HashSet<>();
+		for (TableMapping mapping : mappings) {
+			seenAuditTables.add(mapping.auditTable.toLowerCase(Locale.ROOT));
+		}
+		
+		String[] affixes = auditTableAffixes(sfi);
+		for (EntityPersister persister : sfi.getMetamodel().entityPersisters().values()) {
+			if (!(persister instanceof AbstractEntityPersister)) {
+				continue;
+			}
+			String table = unqualifiedTableName(((AbstractEntityPersister) persister).getTableName());
+			String baseTable = stripAuditAffixes(table, affixes[0], affixes[1]);
+			if (baseTable != null && seenAuditTables.add(table.toLowerCase(Locale.ROOT))) {
+				mappings.add(new TableMapping(baseTable, table));
+			}
+		}
+		return mappings;
+	}
+	
+	/**
+	 * The Envers audit table prefix and suffix, read from the SessionFactory's merged settings (which
+	 * include both core's hibernate.default.properties and the runtime properties). Falls back to
+	 * Envers' own defaults: empty prefix and {@code _AUD} — note that stock OpenMRS 2.7/2.8 does not
+	 * override the suffix, so {@code _audit} must never be assumed.
+	 */
+	String[] auditTableAffixes(SessionFactoryImplementor sfi) {
+		Map<String, Object> settings = sfi.getProperties();
+		Object prefix = settings.get("org.hibernate.envers.audit_table_prefix");
+		Object suffix = settings.get("org.hibernate.envers.audit_table_suffix");
+		return new String[] { prefix != null ? prefix.toString() : "", suffix != null ? suffix.toString() : "_AUD" };
+	}
+	
+	/**
+	 * Derives the base table name from an audit table name by stripping the configured prefix and
+	 * suffix, or returns null when the name does not follow the audit naming convention.
+	 */
+	String stripAuditAffixes(String tableName, String prefix, String suffix) {
+		if (tableName == null || (prefix.isEmpty() && suffix.isEmpty())) {
+			return null;
+		}
+		if (!tableName.startsWith(prefix) || !tableName.endsWith(suffix)
+		        || tableName.length() <= prefix.length() + suffix.length()) {
+			return null;
+		}
+		return tableName.substring(prefix.length(), tableName.length() - suffix.length());
 	}
 	
 	private Map<String, Set<String>> readAuditTableParents(List<TableMapping> mappings, Connection connection)
@@ -227,10 +425,7 @@ public class AuditBackfillDao {
 	private long executeBackfill(Connection connection, TableMapping mapping, int revId) throws SQLException {
 		DatabaseMetaData md = connection.getMetaData();
 		String catalog = connection.getCatalog();
-		String quote = md.getIdentifierQuoteString();
-		if (quote == null || " ".equals(quote)) {
-			quote = "";
-		}
+		String quote = identifierQuote(md);
 		
 		List<String> auditColumns = getColumnNames(md, catalog, mapping.auditTable);
 		if (auditColumns.isEmpty()) {
@@ -297,6 +492,77 @@ public class AuditBackfillDao {
 		return sql.toString();
 	}
 	
+	/**
+	 * Builds the CREATE TABLE statement for the Envers revision table from persister-derived inputs.
+	 */
+	String buildCreateRevisionTableSql(String tableName, String idColumn, String idColumnDdl,
+	        List<ColumnDefinition> propertyColumns, String quote) {
+		StringBuilder sql = new StringBuilder("CREATE TABLE ").append(quoteIdentifier(tableName, quote)).append(" (");
+		sql.append(quoteIdentifier(idColumn, quote)).append(' ').append(idColumnDdl);
+		for (ColumnDefinition column : propertyColumns) {
+			sql.append(", ").append(quoteIdentifier(column.name, quote)).append(' ').append(column.typeDdl);
+			if (!column.nullable) {
+				sql.append(" NOT NULL");
+			}
+		}
+		sql.append(", PRIMARY KEY (").append(quoteIdentifier(idColumn, quote)).append("))");
+		return sql.toString();
+	}
+	
+	/**
+	 * Builds the CREATE TABLE statement for one audit table: all base columns (nullable), plus REV and
+	 * REVTYPE, with PRIMARY KEY (base PK columns, REV) — the same shape Envers' own DDL uses. No
+	 * defaults, no auto-increment, no unique indexes (a cloned unique index would break multiple
+	 * revisions of the same row) and no foreign keys.
+	 */
+	String buildCreateAuditTableSql(TableMapping mapping, List<ColumnDefinition> baseColumns, List<String> basePkColumns,
+	        String revColumnType, String revTypeColumnType, String quote) {
+		StringBuilder sql = new StringBuilder("CREATE TABLE ").append(quoteIdentifier(mapping.auditTable, quote))
+		        .append(" (");
+		for (ColumnDefinition column : baseColumns) {
+			sql.append(quoteIdentifier(column.name, quote)).append(' ').append(column.typeDdl).append(", ");
+		}
+		sql.append("REV ").append(revColumnType).append(" NOT NULL, REVTYPE ").append(revTypeColumnType);
+		if (!basePkColumns.isEmpty()) {
+			sql.append(", PRIMARY KEY (");
+			for (String pkColumn : basePkColumns) {
+				sql.append(quoteIdentifier(pkColumn, quote)).append(", ");
+			}
+			sql.append("REV)");
+		}
+		sql.append(")");
+		return sql.toString();
+	}
+	
+	/** Reads the column definitions of a table from JDBC metadata; audit clones are always nullable. */
+	private List<ColumnDefinition> readColumnDefinitions(DatabaseMetaData md, String catalog, String table)
+	        throws SQLException {
+		List<ColumnDefinition> columns = new ArrayList<>();
+		try (ResultSet rs = md.getColumns(catalog, null, table, "%")) {
+			while (rs.next()) {
+				String typeDdl = columnTypeDdl(rs.getString("TYPE_NAME"), rs.getInt("COLUMN_SIZE"),
+				    rs.getInt("DECIMAL_DIGITS"));
+				columns.add(new ColumnDefinition(rs.getString("COLUMN_NAME"), typeDdl, true));
+			}
+		}
+		return columns;
+	}
+	
+	/**
+	 * Re-attaches the size arguments JDBC strips from sized types; every other TYPE_NAME comes back
+	 * complete and passes through unchanged.
+	 */
+	String columnTypeDdl(String typeName, int size, int digits) {
+		String upper = typeName == null ? "" : typeName.toUpperCase(Locale.ROOT);
+		if ("VARCHAR".equals(upper) || "CHAR".equals(upper) || "VARBINARY".equals(upper) || "BINARY".equals(upper)) {
+			return typeName + "(" + size + ")";
+		}
+		if ("DECIMAL".equals(upper) || "NUMERIC".equals(upper)) {
+			return typeName + "(" + size + ", " + digits + ")";
+		}
+		return typeName;
+	}
+	
 	private List<String> getColumnNames(DatabaseMetaData md, String catalog, String table) throws SQLException {
 		List<String> columns = new ArrayList<>();
 		try (ResultSet rs = md.getColumns(catalog, null, table, "%")) {
@@ -349,6 +615,22 @@ public class AuditBackfillDao {
 		}
 	}
 	
+	private Set<String> readExistingTableNames(DatabaseMetaData metaData, String catalog) throws SQLException {
+		Set<String> tables = new HashSet<>();
+		
+		try (ResultSet resultSet = metaData.getTables(catalog, null, "%", new String[] { "TABLE" })) {
+			while (resultSet.next()) {
+				tables.add(resultSet.getString("TABLE_NAME").toLowerCase(Locale.ROOT));
+			}
+		}
+		return tables;
+	}
+	
+	private String identifierQuote(DatabaseMetaData metaData) throws SQLException {
+		String quote = metaData.getIdentifierQuoteString();
+		return StringUtils.isNotBlank(quote) ? quote : "";
+	}
+	
 	/** Resolved base/audit table pair for one audited entity. */
 	public static final class TableMapping {
 		
@@ -367,6 +649,22 @@ public class AuditBackfillDao {
 		
 		public String getAuditTable() {
 			return auditTable;
+		}
+	}
+	
+	/** One column of a CREATE TABLE statement: name, complete type DDL, and nullability. */
+	static final class ColumnDefinition {
+		
+		final String name;
+		
+		final String typeDdl;
+		
+		final boolean nullable;
+		
+		ColumnDefinition(String name, String typeDdl, boolean nullable) {
+			this.name = name;
+			this.typeDdl = typeDdl;
+			this.nullable = nullable;
 		}
 	}
 	

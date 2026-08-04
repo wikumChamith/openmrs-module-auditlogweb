@@ -14,6 +14,10 @@ import org.apache.commons.lang3.StringUtils;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
 import org.hibernate.Transaction;
+import org.hibernate.boot.Metadata;
+import org.hibernate.boot.model.relational.Namespace;
+import org.hibernate.boot.model.relational.Sequence;
+import org.hibernate.cfg.AvailableSettings;
 import org.hibernate.dialect.Dialect;
 import org.hibernate.dialect.identity.IdentityColumnSupport;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
@@ -21,9 +25,21 @@ import org.hibernate.envers.AuditTable;
 import org.hibernate.envers.Audited;
 import org.hibernate.id.IdentityGenerator;
 import org.hibernate.mapping.Column;
+import org.hibernate.mapping.Table;
 import org.hibernate.metamodel.spi.MetamodelImplementor;
 import org.hibernate.persister.entity.AbstractEntityPersister;
 import org.hibernate.persister.entity.EntityPersister;
+import org.hibernate.tool.schema.TargetType;
+import org.hibernate.tool.schema.spi.ExceptionHandler;
+import org.hibernate.tool.schema.spi.ExecutionOptions;
+import org.hibernate.tool.schema.spi.SchemaFilter;
+import org.hibernate.tool.schema.spi.SchemaFilterProvider;
+import org.hibernate.tool.schema.spi.SchemaManagementTool;
+import org.hibernate.tool.schema.spi.SchemaMigrator;
+import org.hibernate.tool.schema.spi.ScriptTargetOutput;
+import org.hibernate.tool.schema.spi.TargetDescriptor;
+import org.openmrs.api.context.Context;
+import org.openmrs.api.db.hibernate.HibernateSessionFactoryBean;
 import org.openmrs.api.db.hibernate.envers.OpenmrsRevisionEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +56,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -124,27 +141,34 @@ public class AuditBackfillDao {
 	
 	/**
 	 * Creates the Envers revision table and any missing audit tables; without them every audited write
-	 * fails. Idempotent: only tables that do not exist yet are created, each in its own try/catch so
-	 * one failure does not stop the rest.
+	 * fails. Audit tables whose base table exists are cloned from the base table's JDBC metadata (the
+	 * real column types, immune to entity-annotation drift); the remaining tables — Envers' relation
+	 * tables for unidirectional collections (e.g. Location_LocationAttribute), which have no base table
+	 * — are created by Hibernate's schema migration restricted to exactly those table names.
+	 * Idempotent: only tables that do not exist yet are created, each in its own try/catch so one
+	 * failure does not stop the rest.
 	 *
 	 * @return the number of tables created
 	 */
 	public int createMissingAuditTables() {
+		SessionFactoryImplementor sfi = sessionFactory.unwrap(SessionFactoryImplementor.class);
+		
+		int created;
 		try (Session session = sessionFactory.openSession()) {
-			return session.doReturningWork(connection -> {
+			created = session.doReturningWork(connection -> {
 				DatabaseMetaData metaData = connection.getMetaData();
 				String catalog = connection.getCatalog();
 				String quote = identifierQuote(metaData);
 				Set<String> existingTables = readExistingTableNames(metaData, catalog);
-				
-				SessionFactoryImplementor sfi = sessionFactory.unwrap(SessionFactoryImplementor.class);
 				Dialect dialect = sfi.getJdbcServices().getDialect();
 				
-				int created = createRevisionTableIfMissing(connection, sfi, dialect, existingTables, quote);
-				created += createAuditTablesIfMissing(connection, metaData, catalog, dialect, existingTables, quote);
-				return created;
+				int count = createRevisionTableIfMissing(connection, sfi, dialect, existingTables, quote);
+				count += createAuditTablesIfMissing(connection, metaData, catalog, dialect, existingTables, quote);
+				return count;
 			});
 		}
+		created += createBaselessTablesViaMigration(sfi);
+		return created;
 	}
 	
 	/**
@@ -236,8 +260,8 @@ public class AuditBackfillDao {
 				continue;
 			}
 			if (!existingTables.contains(mapping.baseTable.toLowerCase(Locale.ROOT))) {
-				log.warn("Base table {} does not exist; skipping creation of audit table {}.", mapping.baseTable,
-				    mapping.auditTable);
+				log.debug("Base table {} does not exist; audit table {} is left to the schema migration pass.",
+				    mapping.baseTable, mapping.auditTable);
 				continue;
 			}
 			try {
@@ -285,6 +309,175 @@ public class AuditBackfillDao {
 			}
 		}
 		return mappings;
+	}
+	
+	/**
+	 * Creates whatever Envers tables are still missing after the clone pass — the relation audit tables
+	 * that have no base table — via Hibernate's schema migration over the boot-time metadata,
+	 * restricted to exactly those table names.
+	 *
+	 * @return the number of tables the migration created
+	 */
+	private int createBaselessTablesViaMigration(SessionFactoryImplementor sfi) {
+		Metadata metadata = bootMetadata();
+		if (metadata == null) {
+			log.warn("Hibernate boot metadata is unavailable; cannot create audit tables that have no base table.");
+			return 0;
+		}
+		String[] affixes = auditTableAffixes(sfi);
+		Set<String> expectedTables = expectedEnversTables(metadata, affixes[0], affixes[1]);
+		Set<String> missingBefore = missingTables(expectedTables);
+		if (missingBefore.isEmpty()) {
+			return 0;
+		}
+		
+		log.warn("Creating {} remaining Envers table(s) via Hibernate schema migration...", missingBefore.size());
+		runEnversSchemaMigration(metadata, sfi, missingBefore);
+		
+		Set<String> missingAfter = missingTables(expectedTables);
+		for (String table : missingAfter) {
+			log.warn("Envers table {} is still missing after schema migration.", table);
+		}
+		return missingBefore.size() - missingAfter.size();
+	}
+	
+	/**
+	 * The boot-time Hibernate metadata (which includes the Envers audit entity mappings), captured by
+	 * core's session factory bean at bootstrap; null when it cannot be obtained.
+	 */
+	private Metadata bootMetadata() {
+		try {
+			List<HibernateSessionFactoryBean> beans = Context.getRegisteredComponents(HibernateSessionFactoryBean.class);
+			return beans.isEmpty() ? null : beans.get(0).getMetadata();
+		}
+		catch (Exception e) {
+			log.warn("Could not access the Hibernate session factory bean: {}", e.getMessage());
+			return null;
+		}
+	}
+	
+	/** The lowercased unqualified names of every Envers table mapped in the metadata. */
+	Set<String> expectedEnversTables(Metadata metadata, String prefix, String suffix) {
+		Set<String> result = new LinkedHashSet<>();
+		for (Table table : metadata.collectTableMappings()) {
+			String name = unqualifiedTableName(table.getName());
+			if (isEnversTable(name, prefix, suffix)) {
+				result.add(name.toLowerCase(Locale.ROOT));
+			}
+		}
+		return result;
+	}
+	
+	/** Which of the expected tables do not exist in the database (lowercased names). */
+	private Set<String> missingTables(Set<String> expectedTables) {
+		try (Session session = sessionFactory.openSession()) {
+			return session.doReturningWork(connection -> {
+				Set<String> missing = new LinkedHashSet<>(expectedTables);
+				missing.removeAll(readExistingTableNames(connection.getMetaData(), connection.getCatalog()));
+				return missing;
+			});
+		}
+	}
+	
+	/**
+	 * Whether a table is one Envers writes to: the revision table, or any table following the
+	 * configured audit prefix/suffix naming convention.
+	 */
+	boolean isEnversTable(String tableName, String prefix, String suffix) {
+		String lower = tableName.toLowerCase(Locale.ROOT);
+		if ("revision_entity".equals(lower) || "revinfo".equals(lower)) {
+			return true;
+		}
+		return stripAuditAffixes(tableName, prefix, suffix) != null;
+	}
+	
+	/**
+	 * Runs Hibernate's schema migration (the mechanism behind hbm2ddl.auto=update) restricted to
+	 * exactly the given table names, so it cannot touch any other table. Failures are logged per
+	 * statement; missing tables are reported by the caller's before/after comparison.
+	 */
+	private void runEnversSchemaMigration(Metadata metadata, SessionFactoryImplementor sfi, Set<String> tableNames) {
+		Map<String, Object> settings = new HashMap<>(sfi.getProperties());
+		settings.put(AvailableSettings.HBM2DDL_FILTER_PROVIDER, new NamedTableSchemaFilterProvider(tableNames));
+		
+		SchemaMigrator migrator = sfi.getServiceRegistry().getService(SchemaManagementTool.class)
+		        .getSchemaMigrator(settings);
+		
+		ExecutionOptions options = new ExecutionOptions() {
+			
+			@Override
+			public Map getConfigurationValues() {
+				return settings;
+			}
+			
+			@Override
+			public boolean shouldManageNamespaces() {
+				return false;
+			}
+			
+			@Override
+			public ExceptionHandler getExceptionHandler() {
+				return exception -> log.warn("Envers schema migration issue: {}", exception.getMessage());
+			}
+		};
+		TargetDescriptor targetDescriptor = new TargetDescriptor() {
+			
+			@Override
+			public EnumSet<TargetType> getTargetTypes() {
+				return EnumSet.of(TargetType.DATABASE);
+			}
+			
+			@Override
+			public ScriptTargetOutput getScriptTargetOutput() {
+				return null;
+			}
+		};
+		migrator.doMigration(metadata, options, targetDescriptor);
+	}
+	
+	/** Restricts Hibernate's schema tooling to an explicit set of (lowercased) table names. */
+	private final class NamedTableSchemaFilterProvider implements SchemaFilterProvider, SchemaFilter {
+		
+		private final Set<String> tableNames;
+		
+		private NamedTableSchemaFilterProvider(Set<String> tableNames) {
+			this.tableNames = tableNames;
+		}
+		
+		@Override
+		public SchemaFilter getCreateFilter() {
+			return this;
+		}
+		
+		@Override
+		public SchemaFilter getDropFilter() {
+			return this;
+		}
+		
+		@Override
+		public SchemaFilter getMigrateFilter() {
+			return this;
+		}
+		
+		@Override
+		public SchemaFilter getValidateFilter() {
+			return this;
+		}
+		
+		@Override
+		public boolean includeNamespace(Namespace namespace) {
+			return true;
+		}
+		
+		@Override
+		public boolean includeTable(Table table) {
+			return tableNames.contains(unqualifiedTableName(table.getName()).toLowerCase(Locale.ROOT));
+		}
+		
+		@Override
+		public boolean includeSequence(Sequence sequence) {
+			return false;
+		}
 	}
 	
 	/**

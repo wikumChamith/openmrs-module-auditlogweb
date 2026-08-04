@@ -24,7 +24,9 @@ import java.util.Set;
 import static java.util.Collections.emptySet;
 import static java.util.Collections.singleton;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AuditBackfillDaoTest {
 	
@@ -116,20 +118,6 @@ class AuditBackfillDaoTest {
 	}
 	
 	@Test
-	void shouldReattachSizeArgumentsToSizedColumnTypes() {
-		assertEquals("VARCHAR(50)", dao.columnTypeDdl("VARCHAR", 50, 0));
-		assertEquals("CHAR(38)", dao.columnTypeDdl("CHAR", 38, 0));
-		assertEquals("DECIMAL(10, 2)", dao.columnTypeDdl("DECIMAL", 10, 2));
-	}
-	
-	@Test
-	void shouldPassThroughUnsizedColumnTypes() {
-		assertEquals("datetime", dao.columnTypeDdl("datetime", 19, 0));
-		assertEquals("INT", dao.columnTypeDdl("INT", 10, 0));
-		assertEquals("TEXT", dao.columnTypeDdl("TEXT", 65535, 0));
-	}
-	
-	@Test
 	void shouldStripAuditAffixesFromAuditTableName() {
 		assertEquals("role_privilege", dao.stripAuditAffixes("role_privilege_audit", "", "_audit"));
 		assertEquals("person", dao.stripAuditAffixes("aud_person_hist", "aud_", "_hist"));
@@ -142,6 +130,20 @@ class AuditBackfillDaoTest {
 		assertNull(dao.stripAuditAffixes("_audit", "", "_audit"));
 		assertNull(dao.stripAuditAffixes("person_audit", "", ""));
 		assertNull(dao.stripAuditAffixes(null, "", "_audit"));
+	}
+	
+	@Test
+	void shouldReattachSizeArgumentsToSizedColumnTypes() {
+		assertEquals("VARCHAR(50)", dao.columnTypeDdl("VARCHAR", 50, 0));
+		assertEquals("CHAR(38)", dao.columnTypeDdl("CHAR", 38, 0));
+		assertEquals("DECIMAL(10, 2)", dao.columnTypeDdl("DECIMAL", 10, 2));
+	}
+	
+	@Test
+	void shouldPassThroughUnsizedColumnTypes() {
+		assertEquals("datetime", dao.columnTypeDdl("datetime", 19, 0));
+		assertEquals("INT", dao.columnTypeDdl("INT", 10, 0));
+		assertEquals("TEXT", dao.columnTypeDdl("TEXT", 65535, 0));
 	}
 	
 	@Test
@@ -182,6 +184,20 @@ class AuditBackfillDaoTest {
 		    columns, Collections.emptyList(), "integer", "tinyint", "");
 		
 		assertEquals("CREATE TABLE obs_reference_range_audit (obs_id INT, REV integer NOT NULL, REVTYPE tinyint)", sql);
+	}
+	
+	@Test
+	void shouldRecognizeRevisionAndAuditTablesAsEnversTables() {
+		assertTrue(dao.isEnversTable("revision_entity", "", "_AUD"));
+		assertTrue(dao.isEnversTable("REVINFO", "", "_AUD"));
+		assertTrue(dao.isEnversTable("person_AUD", "", "_AUD"));
+		assertTrue(dao.isEnversTable("Location_LocationAttribute_audit", "", "_audit"));
+	}
+	
+	@Test
+	void shouldNotRecognizeBaseTablesAsEnversTables() {
+		assertFalse(dao.isEnversTable("person", "", "_AUD"));
+		assertFalse(dao.isEnversTable("location_attribute", "", "_audit"));
 	}
 	
 	private static List<String> auditNames(List<TableMapping> mappings) {

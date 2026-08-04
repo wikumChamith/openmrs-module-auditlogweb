@@ -14,6 +14,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.openmrs.api.AdministrationService;
 import org.openmrs.api.context.Context;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao;
+import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao.SchemaCreationResult;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao.TableMapping;
 import org.openmrs.module.auditlogweb.api.utils.EnversUtils;
 import org.slf4j.Logger;
@@ -49,9 +50,13 @@ public class AuditBackfillService {
 			log.info("Envers is disabled (hibernate.integration.envers.enabled != true); skipping audit table creation.");
 			return;
 		}
-		int created = auditBackfillDao.createMissingAuditTables();
-		if (created > 0) {
-			log.warn("Created {} missing Envers audit table(s).", created);
+		SchemaCreationResult result = auditBackfillDao.createMissingAuditTables();
+		if (result.getCreated() > 0) {
+			log.warn("Created {} missing Envers audit table(s).", result.getCreated());
+		}
+		if (!result.getMissingTables().isEmpty()) {
+			log.error("{} Envers table(s) could not be created and audited writes to them will fail: {}",
+			    result.getMissingTables().size(), result.getMissingTables());
 		}
 	}
 	

@@ -17,6 +17,9 @@ import org.openmrs.api.context.Context;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao;
 import org.openmrs.module.auditlogweb.api.utils.EnversUtils;
 
+import java.util.Arrays;
+import java.util.Collections;
+
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -71,7 +74,21 @@ class AuditBackfillServiceTest {
 	void shouldCreateMissingAuditTablesWhenEnversEnabled() {
 		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class)) {
 			envers.when(EnversUtils::isEnversEnabled).thenReturn(true);
-			when(auditBackfillDao.createMissingAuditTables()).thenReturn(3);
+			when(auditBackfillDao.createMissingAuditTables())
+			        .thenReturn(new AuditBackfillDao.SchemaCreationResult(3, Collections.emptyList()));
+			
+			service.createMissingAuditTablesIfEnabled();
+			
+			verify(auditBackfillDao).createMissingAuditTables();
+		}
+	}
+	
+	@Test
+	void shouldNotFailWhenSomeAuditTablesCouldNotBeCreated() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(true);
+			when(auditBackfillDao.createMissingAuditTables()).thenReturn(
+			    new AuditBackfillDao.SchemaCreationResult(0, Arrays.asList("person_aud", "revision_entity")));
 			
 			service.createMissingAuditTablesIfEnabled();
 			

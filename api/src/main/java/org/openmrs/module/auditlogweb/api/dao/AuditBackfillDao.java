@@ -9,6 +9,7 @@
  */
 package org.openmrs.module.auditlogweb.api.dao;
 
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.hibernate.Session;
@@ -148,9 +149,9 @@ public class AuditBackfillDao {
 	 * Idempotent: only tables that do not exist yet are created, each in its own try/catch so one
 	 * failure does not stop the rest.
 	 *
-	 * @return the number of tables created
+	 * @return the number of tables created and the Envers tables that are still missing afterwards
 	 */
-	public int createMissingAuditTables() {
+	public SchemaCreationResult createMissingAuditTables() {
 		SessionFactoryImplementor sfi = sessionFactory.unwrap(SessionFactoryImplementor.class);
 		
 		int created;
@@ -168,7 +169,23 @@ public class AuditBackfillDao {
 			});
 		}
 		created += createBaselessTablesViaMigration(sfi);
-		return created;
+		return new SchemaCreationResult(created, findMissingEnversTables(sfi));
+	}
+	
+	/**
+	 * Every Envers table the metamodel expects (the revision table plus all audit tables) that still
+	 * does not exist in the database. Non-empty means audited writes to those tables will fail.
+	 */
+	private List<String> findMissingEnversTables(SessionFactoryImplementor sfi) {
+		Set<String> expectedTables = new LinkedHashSet<>();
+		AbstractEntityPersister revisionPersister = findRevisionEntityPersister(sfi);
+		if (revisionPersister != null) {
+			expectedTables.add(unqualifiedTableName(revisionPersister.getTableName()).toLowerCase(Locale.ROOT));
+		}
+		for (TableMapping mapping : resolveAllAuditTableMappings()) {
+			expectedTables.add(mapping.auditTable.toLowerCase(Locale.ROOT));
+		}
+		return new ArrayList<>(missingTables(expectedTables));
 	}
 	
 	/**
@@ -361,11 +378,7 @@ public class AuditBackfillDao {
 		log.warn("Creating {} remaining Envers table(s) via Hibernate schema migration...", missingBefore.size());
 		runEnversSchemaMigration(metadata, sfi, missingBefore);
 		
-		Set<String> missingAfter = missingTables(expectedTables);
-		for (String table : missingAfter) {
-			log.warn("Envers table {} is still missing after schema migration.", table);
-		}
-		return missingBefore.size() - missingAfter.size();
+		return missingBefore.size() - missingTables(expectedTables).size();
 	}
 	
 	/**
@@ -872,20 +885,23 @@ public class AuditBackfillDao {
 		}
 	}
 	
-	/** One column of a CREATE TABLE statement: name, complete type DDL, and nullability. */
-	static final class ColumnDefinition {
+	/** Outcome of {@link #createMissingAuditTables()}: tables created and tables still missing. */
+	@RequiredArgsConstructor
+	@Getter
+	public static final class SchemaCreationResult {
+		private final int created;
 		
+		private final List<String> missingTables;
+	}
+	
+	/** One column of a CREATE TABLE statement: name, complete type DDL, and nullability. */
+	@RequiredArgsConstructor
+	static final class ColumnDefinition {
 		final String name;
 		
 		final String typeDdl;
 		
 		final boolean nullable;
-		
-		ColumnDefinition(String name, String typeDdl, boolean nullable) {
-			this.name = name;
-			this.typeDdl = typeDdl;
-			this.nullable = nullable;
-		}
 	}
-	
+
 }

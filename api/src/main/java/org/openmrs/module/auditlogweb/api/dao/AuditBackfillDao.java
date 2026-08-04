@@ -312,6 +312,33 @@ public class AuditBackfillDao {
 	}
 	
 	/**
+	 * The mappings the backfill can copy rows into: every Envers audit table whose base table exists.
+	 * Envers' relation tables for unidirectional collections (e.g. Location_LocationAttribute) have no
+	 * base table to copy from and are excluded — the collections they back simply read as empty at the
+	 * baseline revision.
+	 */
+	public List<TableMapping> resolveBackfillableTableMappings() {
+		List<TableMapping> mappings = resolveAllAuditTableMappings();
+		try (Session session = sessionFactory.openSession()) {
+			Set<String> existingTables = session.doReturningWork(
+			    connection -> readExistingTableNames(connection.getMetaData(), connection.getCatalog()));
+			return filterMappingsWithExistingBase(mappings, existingTables);
+		}
+	}
+	
+	List<TableMapping> filterMappingsWithExistingBase(List<TableMapping> mappings, Set<String> existingTables) {
+		List<TableMapping> result = new ArrayList<>();
+		for (TableMapping mapping : mappings) {
+			if (existingTables.contains(mapping.baseTable.toLowerCase(Locale.ROOT))) {
+				result.add(mapping);
+			} else {
+				log.debug("No base table {} to backfill from; skipping {}.", mapping.baseTable, mapping.auditTable);
+			}
+		}
+		return result;
+	}
+	
+	/**
 	 * Creates whatever Envers tables are still missing after the clone pass — the relation audit tables
 	 * that have no base table — via Hibernate's schema migration over the boot-time metadata,
 	 * restricted to exactly those table names.

@@ -75,7 +75,7 @@ public class AuditBackfillService {
 			return;
 		}
 		
-		List<TableMapping> mappings = auditBackfillDao.resolveAuditedTableMappings();
+		List<TableMapping> mappings = auditBackfillDao.resolveBackfillableTableMappings();
 		if (mappings.isEmpty()) {
 			log.warn("No audited entities resolved from the metamodel; aborting audit backfill.");
 			return;

@@ -187,6 +187,17 @@ class AuditBackfillDaoTest {
 	}
 	
 	@Test
+	void shouldKeepOnlyMappingsWhoseBaseTableExists() {
+		TableMapping withBase = new TableMapping("role_privilege", "role_privilege_AUD");
+		TableMapping withoutBase = new TableMapping("Location_LocationAttribute", "Location_LocationAttribute_AUD");
+		Set<String> existingTables = new java.util.HashSet<>(Arrays.asList("role_privilege", "location", "person"));
+		
+		List<TableMapping> result = dao.filterMappingsWithExistingBase(Arrays.asList(withBase, withoutBase), existingTables);
+		
+		assertEquals(Collections.singletonList("role_privilege_AUD"), auditNames(result));
+	}
+	
+	@Test
 	void shouldRecognizeRevisionAndAuditTablesAsEnversTables() {
 		assertTrue(dao.isEnversTable("revision_entity", "", "_AUD"));
 		assertTrue(dao.isEnversTable("REVINFO", "", "_AUD"));

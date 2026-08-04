@@ -889,6 +889,7 @@ public class AuditBackfillDao {
 	@RequiredArgsConstructor
 	@Getter
 	public static final class SchemaCreationResult {
+		
 		private final int created;
 		
 		private final List<String> missingTables;
@@ -897,11 +898,12 @@ public class AuditBackfillDao {
 	/** One column of a CREATE TABLE statement: name, complete type DDL, and nullability. */
 	@RequiredArgsConstructor
 	static final class ColumnDefinition {
+		
 		final String name;
 		
 		final String typeDdl;
 		
 		final boolean nullable;
 	}
-
+	
 }

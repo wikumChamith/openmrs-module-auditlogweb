@@ -181,6 +181,8 @@ public class AuditBackfillDao {
 		AbstractEntityPersister revisionPersister = findRevisionEntityPersister(sfi);
 		if (revisionPersister != null) {
 			expectedTables.add(unqualifiedTableName(revisionPersister.getTableName()).toLowerCase(Locale.ROOT));
+		} else {
+			expectedTables.add("revision_entity");
 		}
 		for (TableMapping mapping : resolveAllAuditTableMappings()) {
 			expectedTables.add(mapping.auditTable.toLowerCase(Locale.ROOT));
@@ -229,7 +231,7 @@ public class AuditBackfillDao {
 			return 1;
 		}
 		catch (Exception e) {
-			log.warn("Could not create Envers revision table {}: {}", tableName, e.getMessage());
+			log.warn("Could not create Envers revision table {}", tableName, e);
 			return 0;
 		}
 	}
@@ -296,11 +298,11 @@ public class AuditBackfillDao {
 					statement.execute(buildCreateRevIndexSql(mapping, quote));
 				}
 				catch (Exception e) {
-					log.warn("Could not create REV index on {}: {}", mapping.auditTable, e.getMessage());
+					log.warn("Could not create REV index on {}", mapping.auditTable, e);
 				}
 			}
 			catch (Exception e) {
-				log.warn("Could not create audit table {}: {}", mapping.auditTable, e.getMessage());
+				log.warn("Could not create audit table {}", mapping.auditTable, e);
 			}
 		}
 		return created;
@@ -335,17 +337,112 @@ public class AuditBackfillDao {
 	}
 	
 	/**
-	 * The mappings the backfill can copy rows into: every Envers audit table whose base table exists.
-	 * Envers' relation tables for unidirectional collections (e.g. Location_LocationAttribute) have no
-	 * base table to copy from and are excluded — the collections they back simply read as empty at the
-	 * baseline revision.
+	 * Adds to every existing audit table the base-table columns it lacks, cloned nullable from the base
+	 * table's JDBC metadata — add-only, never drops or retypes. Heals audit tables that went stale
+	 * because a platform upgrade added columns to their base table; without this, Envers inserts naming
+	 * a new column fail against the old audit table.
+	 *
+	 * @return the number of columns added and the audit tables whose sync failed
+	 */
+	public ColumnSyncResult addMissingAuditColumns() {
+		try (Session session = sessionFactory.openSession()) {
+			return session.doReturningWork(connection -> {
+				DatabaseMetaData metaData = connection.getMetaData();
+				String catalog = connection.getCatalog();
+				String quote = identifierQuote(metaData);
+				Set<String> existingTables = readExistingTableNames(metaData, catalog);
+				
+				int added = 0;
+				List<String> failedTables = new ArrayList<>();
+				for (TableMapping mapping : resolveAllAuditTableMappings()) {
+					if (!existingTables.contains(mapping.auditTable.toLowerCase(Locale.ROOT))) {
+						continue;
+					}
+					if (!existingTables.contains(mapping.baseTable.toLowerCase(Locale.ROOT))) {
+						log.debug("No base table {} to sync columns from; skipping {}.", mapping.baseTable,
+						    mapping.auditTable);
+						continue;
+					}
+					try {
+						Set<String> auditColumns = toLowerCaseSet(getColumnNames(metaData, catalog, mapping.auditTable));
+						for (ColumnDefinition column : readColumnDefinitions(metaData, catalog, mapping.baseTable)) {
+							if (auditColumns.contains(column.name.toLowerCase(Locale.ROOT))) {
+								continue;
+							}
+							try (Statement statement = connection.createStatement()) {
+								statement.execute(buildAddColumnSql(mapping, column, quote));
+							}
+							added++;
+							log.warn("Added column {} to audit table {}.", column.name, mapping.auditTable);
+						}
+						try {
+							if (!hasRevLedIndex(metaData, catalog, mapping.auditTable)) {
+								log.warn("Adding REV index to audit table {} (may take a while on large tables)...",
+								    mapping.auditTable);
+								try (Statement statement = connection.createStatement()) {
+									statement.execute(buildCreateRevIndexSql(mapping, quote));
+								}
+							}
+						}
+						catch (Exception e) {
+							log.warn("Could not add REV index to {}", mapping.auditTable, e);
+						}
+					}
+					catch (Exception e) {
+						failedTables.add(mapping.auditTable);
+						log.warn("Could not sync columns of audit table {}", mapping.auditTable, e);
+					}
+				}
+				return new ColumnSyncResult(added, failedTables);
+			});
+		}
+	}
+	
+	/**
+	 * Whether the table has any index whose leading column is REV (the composite PK does not count).
+	 */
+	private boolean hasRevLedIndex(DatabaseMetaData md, String catalog, String table) throws SQLException {
+		try (ResultSet rs = md.getIndexInfo(catalog, null, table, false, false)) {
+			while (rs.next()) {
+				if ("REV".equalsIgnoreCase(rs.getString("COLUMN_NAME")) && rs.getShort("ORDINAL_POSITION") == 1) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	
+	/** ALTER statement adding one base-table column to its audit table, nullable. */
+	String buildAddColumnSql(TableMapping mapping, ColumnDefinition column, String quote) {
+		return "ALTER TABLE " + quoteIdentifier(mapping.auditTable, quote) + " ADD " + quoteIdentifier(column.name, quote)
+		        + " " + column.typeDdl;
+	}
+	
+	/**
+	 * The mappings the backfill can copy rows into: every Envers audit table whose base table exists
+	 * and has a primary key (the idempotent insert joins on it). Excluded tables — relation audit
+	 * tables without a base table (e.g. Location_LocationAttribute) and tables whose base has no
+	 * primary key (e.g. concept_name_tag_map) — simply get no baseline rows.
 	 */
 	public List<TableMapping> resolveBackfillableTableMappings() {
 		List<TableMapping> mappings = resolveAllAuditTableMappings();
 		try (Session session = sessionFactory.openSession()) {
-			Set<String> existingTables = session.doReturningWork(
-			    connection -> readExistingTableNames(connection.getMetaData(), connection.getCatalog()));
-			return filterMappingsWithExistingBase(mappings, existingTables);
+			return session.doReturningWork(connection -> {
+				DatabaseMetaData metaData = connection.getMetaData();
+				String catalog = connection.getCatalog();
+				Set<String> existingTables = readExistingTableNames(metaData, catalog);
+				
+				List<TableMapping> result = new ArrayList<>();
+				for (TableMapping mapping : filterMappingsWithExistingBase(mappings, existingTables)) {
+					if (getPrimaryKeyColumns(metaData, catalog, mapping.baseTable).isEmpty()) {
+						log.info("Base table {} has no primary key; skipping backfill of {}.", mapping.baseTable,
+						    mapping.auditTable);
+						continue;
+					}
+					result.add(mapping);
+				}
+				return result;
+			});
 		}
 	}
 	
@@ -384,7 +481,13 @@ public class AuditBackfillDao {
 		log.warn("Creating {} remaining Envers table(s) via Hibernate schema migration...", missingBefore.size());
 		runEnversSchemaMigration(metadata, sfi, missingBefore);
 		
-		return missingBefore.size() - missingTables(expectedTables).size();
+		Set<String> missingAfter = missingTables(expectedTables);
+		for (String table : missingBefore) {
+			if (!missingAfter.contains(table)) {
+				log.info("Created Envers table {} via Hibernate schema migration.", table);
+			}
+		}
+		return missingBefore.size() - missingAfter.size();
 	}
 	
 	/**
@@ -397,7 +500,7 @@ public class AuditBackfillDao {
 			return beans.isEmpty() ? null : beans.get(0).getMetadata();
 		}
 		catch (Exception e) {
-			log.warn("Could not access the Hibernate session factory bean: {}", e.getMessage());
+			log.warn("Could not access the Hibernate session factory bean", e);
 			return null;
 		}
 	}
@@ -463,7 +566,7 @@ public class AuditBackfillDao {
 			
 			@Override
 			public ExceptionHandler getExceptionHandler() {
-				return exception -> log.warn("Envers schema migration issue: {}", exception.getMessage());
+				return exception -> log.warn("Envers schema migration issue", exception);
 			}
 		};
 		TargetDescriptor targetDescriptor = new TargetDescriptor() {
@@ -788,7 +891,7 @@ public class AuditBackfillDao {
 	private List<ColumnDefinition> readColumnDefinitions(DatabaseMetaData md, String catalog, String table)
 	        throws SQLException {
 		List<ColumnDefinition> columns = new ArrayList<>();
-		try (ResultSet rs = md.getColumns(catalog, null, table, "%")) {
+		try (ResultSet rs = md.getColumns(catalog, null, escapeMetadataPattern(md, table), "%")) {
 			while (rs.next()) {
 				String typeDdl = columnTypeDdl(rs.getString("TYPE_NAME"), rs.getInt("COLUMN_SIZE"),
 				    rs.getInt("DECIMAL_DIGITS"));
@@ -815,12 +918,24 @@ public class AuditBackfillDao {
 	
 	private List<String> getColumnNames(DatabaseMetaData md, String catalog, String table) throws SQLException {
 		List<String> columns = new ArrayList<>();
-		try (ResultSet rs = md.getColumns(catalog, null, table, "%")) {
+		try (ResultSet rs = md.getColumns(catalog, null, escapeMetadataPattern(md, table), "%")) {
 			while (rs.next()) {
 				columns.add(rs.getString("COLUMN_NAME"));
 			}
 		}
 		return columns;
+	}
+	
+	/**
+	 * JDBC metadata methods treat table names as LIKE patterns, so the underscores in OpenMRS table
+	 * names must be escaped or person_name also matches personXname.
+	 */
+	private String escapeMetadataPattern(DatabaseMetaData md, String name) throws SQLException {
+		String escape = md.getSearchStringEscape();
+		if (escape == null || escape.isEmpty()) {
+			return name;
+		}
+		return name.replace(escape, escape + escape).replace("_", escape + "_").replace("%", escape + "%");
 	}
 	
 	private List<String> getPrimaryKeyColumns(DatabaseMetaData md, String catalog, String table) throws SQLException {
@@ -861,7 +976,7 @@ public class AuditBackfillDao {
 			}
 		}
 		catch (RuntimeException e) {
-			log.warn("Rollback failed during audit backfill: {}", e.getMessage());
+			log.warn("Rollback failed during audit backfill", e);
 		}
 	}
 	
@@ -910,6 +1025,18 @@ public class AuditBackfillDao {
 		private final int created;
 		
 		private final List<String> missingTables;
+	}
+	
+	/**
+	 * Outcome of {@link #addMissingAuditColumns()}: columns added and audit tables whose sync failed.
+	 */
+	@RequiredArgsConstructor
+	@Getter
+	public static final class ColumnSyncResult {
+		
+		private final int columnsAdded;
+		
+		private final List<String> failedTables;
 	}
 	
 	/** One column of a CREATE TABLE statement: name, complete type DDL, and nullability. */

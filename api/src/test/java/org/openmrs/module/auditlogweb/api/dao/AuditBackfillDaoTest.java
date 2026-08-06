@@ -195,6 +195,15 @@ class AuditBackfillDaoTest {
 	}
 	
 	@Test
+	void shouldBuildAddColumnSql() {
+		TableMapping mapping = new TableMapping("person", "person_audit");
+		AuditBackfillDao.ColumnDefinition column = new AuditBackfillDao.ColumnDefinition("new_col", "VARCHAR(50)", true);
+		
+		assertEquals("ALTER TABLE `person_audit` ADD `new_col` VARCHAR(50)", dao.buildAddColumnSql(mapping, column, "`"));
+		assertEquals("ALTER TABLE person_audit ADD new_col VARCHAR(50)", dao.buildAddColumnSql(mapping, column, ""));
+	}
+	
+	@Test
 	void shouldKeepOnlyMappingsWhoseBaseTableExists() {
 		TableMapping withBase = new TableMapping("role_privilege", "role_privilege_AUD");
 		TableMapping withoutBase = new TableMapping("Location_LocationAttribute", "Location_LocationAttribute_AUD");

@@ -80,6 +80,16 @@
 			identify (and skip) that baseline revision in the "related entities changed" view.
 		</description>
 	</globalProperty>
+	<globalProperty>
+		<property>auditlogweb.auditColumnSync.openmrsVersion</property>
+		<defaultValue></defaultValue>
+		<description>
+			The OpenMRS version against which existing Envers audit tables were last checked for
+			base-table columns they lack (columns added by platform upgrades). Managed automatically;
+			the check re-runs whenever the running OpenMRS version differs from this value. Clear it
+			to force a re-check on the next startup.
+		</description>
+	</globalProperty>
 
 	<messages>
 		<lang>en</lang>

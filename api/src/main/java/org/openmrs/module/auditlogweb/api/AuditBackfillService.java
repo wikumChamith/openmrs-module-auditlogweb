@@ -14,9 +14,11 @@ import org.apache.commons.lang3.StringUtils;
 import org.openmrs.api.AdministrationService;
 import org.openmrs.api.context.Context;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao;
+import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao.ColumnSyncResult;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao.SchemaCreationResult;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao.TableMapping;
 import org.openmrs.module.auditlogweb.api.utils.EnversUtils;
+import org.openmrs.util.OpenmrsConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -38,6 +40,8 @@ public class AuditBackfillService {
 	
 	public static final String GP_BACKFILL_REVISION = "auditlogweb.backfillExistingData.revision";
 	
+	public static final String GP_COLUMN_SYNC_VERSION = "auditlogweb.auditColumnSync.openmrsVersion";
+	
 	private final AuditBackfillDao auditBackfillDao;
 	
 	/**
@@ -58,6 +62,37 @@ public class AuditBackfillService {
 			log.error("{} Envers table(s) could not be created and audited writes to them will fail: {}",
 			    result.getMissingTables().size(), result.getMissingTables());
 		}
+	}
+	
+	/**
+	 * Adds any base-table columns missing from existing audit tables, but only when the OpenMRS version
+	 * differs from the one recorded at the last sync — base-table schema drift only happens on platform
+	 * upgrades, so the (idempotent) sweep is skipped on ordinary restarts.
+	 */
+	public void syncAuditColumnsIfPlatformUpgraded() {
+		if (!EnversUtils.isEnversEnabled()) {
+			log.info("Envers is disabled (hibernate.integration.envers.enabled != true); skipping audit column sync.");
+			return;
+		}
+		AdministrationService administrationService = Context.getAdministrationService();
+		String currentVersion = OpenmrsConstants.OPENMRS_VERSION != null ? OpenmrsConstants.OPENMRS_VERSION : "";
+		String lastSyncedVersion = administrationService.getGlobalProperty(GP_COLUMN_SYNC_VERSION, "");
+		if (currentVersion.equals(lastSyncedVersion)) {
+			return;
+		}
+		
+		ColumnSyncResult result = auditBackfillDao.addMissingAuditColumns();
+		if (result.getColumnsAdded() > 0) {
+			log.warn("Platform changed ({} -> {}): added {} missing column(s) to existing Envers audit tables.",
+			    lastSyncedVersion, currentVersion, result.getColumnsAdded());
+		}
+		if (!result.getFailedTables().isEmpty()) {
+			log.error(
+			    "Column sync failed for {} audit table(s); audited writes to them may fail: {}. The sync retries on the next startup.",
+			    result.getFailedTables().size(), result.getFailedTables());
+			return;
+		}
+		administrationService.setGlobalProperty(GP_COLUMN_SYNC_VERSION, currentVersion);
 	}
 	
 	/**

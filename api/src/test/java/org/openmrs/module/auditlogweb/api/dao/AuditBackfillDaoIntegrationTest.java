@@ -164,6 +164,34 @@ class AuditBackfillDaoIntegrationTest {
 				        .getSingleResult();
 				assertEquals(1, middleRows.intValue());
 			}
+			
+			// simulate a platform upgrade adding a column to the base table, then sync
+			try (Session session = sessionFactory.openSession()) {
+				session.doWork(connection -> {
+					try (java.sql.Statement statement = connection.createStatement()) {
+						statement.execute("alter table test_book add subtitle varchar(50)");
+					}
+				});
+			}
+			AuditBackfillDao.ColumnSyncResult syncResult = dao.addMissingAuditColumns();
+			assertEquals(1, syncResult.getColumnsAdded());
+			assertTrue(syncResult.getFailedTables().isEmpty());
+			assertTrue(auditTableHasColumn("test_book_AUD", "subtitle"), "expected the synced column on the audit table");
+			// and the sync itself must be idempotent and clean on re-run
+			AuditBackfillDao.ColumnSyncResult secondSync = dao.addMissingAuditColumns();
+			assertEquals(0, secondSync.getColumnsAdded());
+			assertTrue(secondSync.getFailedTables().isEmpty());
+		}
+	}
+	
+	private static boolean auditTableHasColumn(String tableName, String columnName) {
+		try (Session session = sessionFactory.openSession()) {
+			return session.doReturningWork(connection -> {
+				try (java.sql.ResultSet rs = connection.getMetaData().getColumns(connection.getCatalog(), null, tableName,
+				    columnName)) {
+					return rs.next();
+				}
+			});
 		}
 	}
 	

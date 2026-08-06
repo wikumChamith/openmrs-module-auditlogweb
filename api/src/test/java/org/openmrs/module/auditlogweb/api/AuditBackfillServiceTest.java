@@ -16,6 +16,7 @@ import org.openmrs.api.AdministrationService;
 import org.openmrs.api.context.Context;
 import org.openmrs.module.auditlogweb.api.dao.AuditBackfillDao;
 import org.openmrs.module.auditlogweb.api.utils.EnversUtils;
+import org.openmrs.util.OpenmrsConstants;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -93,6 +94,73 @@ class AuditBackfillServiceTest {
 			service.createMissingAuditTablesIfEnabled();
 			
 			verify(auditBackfillDao).createMissingAuditTables();
+		}
+	}
+	
+	@Test
+	void shouldSkipColumnSyncWhenEnversDisabled() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(false);
+			
+			service.syncAuditColumnsIfPlatformUpgraded();
+			
+			verifyNoInteractions(auditBackfillDao);
+		}
+	}
+	
+	@Test
+	void shouldSkipColumnSyncWhenPlatformVersionUnchanged() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class);
+		        MockedStatic<Context> context = mockStatic(Context.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(true);
+			context.when(Context::getAdministrationService).thenReturn(administrationService);
+			String currentVersion = OpenmrsConstants.OPENMRS_VERSION != null ? OpenmrsConstants.OPENMRS_VERSION : "";
+			when(administrationService.getGlobalProperty(AuditBackfillService.GP_COLUMN_SYNC_VERSION, ""))
+			        .thenReturn(currentVersion);
+			
+			service.syncAuditColumnsIfPlatformUpgraded();
+			
+			verifyNoInteractions(auditBackfillDao);
+			verify(administrationService, never()).setGlobalProperty(eq(AuditBackfillService.GP_COLUMN_SYNC_VERSION),
+			    anyString());
+		}
+	}
+	
+	@Test
+	void shouldSyncColumnsAndRecordVersionWhenPlatformVersionChanged() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class);
+		        MockedStatic<Context> context = mockStatic(Context.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(true);
+			context.when(Context::getAdministrationService).thenReturn(administrationService);
+			when(administrationService.getGlobalProperty(AuditBackfillService.GP_COLUMN_SYNC_VERSION, ""))
+			        .thenReturn("some-older-version");
+			when(auditBackfillDao.addMissingAuditColumns())
+			        .thenReturn(new AuditBackfillDao.ColumnSyncResult(2, Collections.emptyList()));
+			
+			service.syncAuditColumnsIfPlatformUpgraded();
+			
+			verify(auditBackfillDao).addMissingAuditColumns();
+			String currentVersion = OpenmrsConstants.OPENMRS_VERSION != null ? OpenmrsConstants.OPENMRS_VERSION : "";
+			verify(administrationService).setGlobalProperty(AuditBackfillService.GP_COLUMN_SYNC_VERSION, currentVersion);
+		}
+	}
+	
+	@Test
+	void shouldNotRecordVersionWhenColumnSyncFailedForSomeTables() {
+		try (MockedStatic<EnversUtils> envers = mockStatic(EnversUtils.class);
+		        MockedStatic<Context> context = mockStatic(Context.class)) {
+			envers.when(EnversUtils::isEnversEnabled).thenReturn(true);
+			context.when(Context::getAdministrationService).thenReturn(administrationService);
+			when(administrationService.getGlobalProperty(AuditBackfillService.GP_COLUMN_SYNC_VERSION, ""))
+			        .thenReturn("some-older-version");
+			when(auditBackfillDao.addMissingAuditColumns())
+			        .thenReturn(new AuditBackfillDao.ColumnSyncResult(1, Collections.singletonList("person_aud")));
+			
+			service.syncAuditColumnsIfPlatformUpgraded();
+			
+			// the version must not advance, so the sync retries on the next startup
+			verify(administrationService, never()).setGlobalProperty(eq(AuditBackfillService.GP_COLUMN_SYNC_VERSION),
+			    anyString());
 		}
 	}
 	

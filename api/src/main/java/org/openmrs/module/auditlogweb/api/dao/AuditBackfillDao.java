@@ -340,7 +340,9 @@ public class AuditBackfillDao {
 	 * Adds to every existing audit table the base-table columns it lacks, cloned nullable from the base
 	 * table's JDBC metadata — add-only, never drops or retypes. Heals audit tables that went stale
 	 * because a platform upgrade added columns to their base table; without this, Envers inserts naming
-	 * a new column fail against the old audit table.
+	 * a new column fail against the old audit table. A column whose type diverges from the base column
+	 * (e.g. the base was widened by a platform upgrade) is reported as a failure rather than altered,
+	 * so the mismatch stays visible at every startup until repaired.
 	 *
 	 * @return the number of columns added and the audit tables whose sync failed
 	 */
@@ -364,16 +366,25 @@ public class AuditBackfillDao {
 						continue;
 					}
 					try {
-						Set<String> auditColumns = toLowerCaseSet(getColumnNames(metaData, catalog, mapping.auditTable));
+						Map<String, String> auditColumnTypes = readColumnTypes(metaData, catalog, mapping.auditTable);
+						List<String> mismatchedColumns = new ArrayList<>();
 						for (ColumnDefinition column : readColumnDefinitions(metaData, catalog, mapping.baseTable)) {
-							if (auditColumns.contains(column.name.toLowerCase(Locale.ROOT))) {
-								continue;
+							String auditType = auditColumnTypes.get(column.name.toLowerCase(Locale.ROOT));
+							if (auditType == null) {
+								try (Statement statement = connection.createStatement()) {
+									statement.execute(buildAddColumnSql(mapping, column, quote));
+								}
+								added++;
+								log.warn("Added column {} to audit table {}.", column.name, mapping.auditTable);
+							} else if (!auditType.equalsIgnoreCase(column.typeDdl)) {
+								mismatchedColumns.add(column.name + " is " + auditType + ", base is " + column.typeDdl);
 							}
-							try (Statement statement = connection.createStatement()) {
-								statement.execute(buildAddColumnSql(mapping, column, quote));
-							}
-							added++;
-							log.warn("Added column {} to audit table {}.", column.name, mapping.auditTable);
+						}
+						if (!mismatchedColumns.isEmpty()) {
+							failedTables.add(mapping.auditTable);
+							log.error(
+							    "Audit table {} has column type(s) diverging from base table {} and must be widened manually: {}",
+							    mapping.auditTable, mapping.baseTable, mismatchedColumns);
 						}
 						try {
 							if (!hasRevLedIndex(metaData, catalog, mapping.auditTable)) {
@@ -410,6 +421,15 @@ public class AuditBackfillDao {
 			}
 		}
 		return false;
+	}
+	
+	/** The table's columns as lowercased name to complete type DDL. */
+	private Map<String, String> readColumnTypes(DatabaseMetaData md, String catalog, String table) throws SQLException {
+		Map<String, String> types = new HashMap<>();
+		for (ColumnDefinition column : readColumnDefinitions(md, catalog, table)) {
+			types.put(column.name.toLowerCase(Locale.ROOT), column.typeDdl);
+		}
+		return types;
 	}
 	
 	/** ALTER statement adding one base-table column to its audit table, nullable. */

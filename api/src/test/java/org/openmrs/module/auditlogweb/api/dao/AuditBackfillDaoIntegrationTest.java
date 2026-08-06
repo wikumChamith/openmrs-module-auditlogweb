@@ -181,6 +181,19 @@ class AuditBackfillDaoIntegrationTest {
 			AuditBackfillDao.ColumnSyncResult secondSync = dao.addMissingAuditColumns();
 			assertEquals(0, secondSync.getColumnsAdded());
 			assertTrue(secondSync.getFailedTables().isEmpty());
+			
+			// a base column widened after the clone must be reported as a failed table, not skipped
+			try (Session session = sessionFactory.openSession()) {
+				session.doWork(connection -> {
+					try (java.sql.Statement statement = connection.createStatement()) {
+						statement.execute("alter table test_book alter column title varchar(200)");
+					}
+				});
+			}
+			AuditBackfillDao.ColumnSyncResult mismatchSync = dao.addMissingAuditColumns();
+			assertEquals(0, mismatchSync.getColumnsAdded());
+			assertTrue(mismatchSync.getFailedTables().contains("test_book_AUD"),
+			    "expected the widened column to mark test_book_AUD as failed, got: " + mismatchSync.getFailedTables());
 		}
 	}
 	

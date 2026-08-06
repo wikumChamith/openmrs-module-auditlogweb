@@ -292,6 +292,12 @@ public class AuditBackfillDao {
 				existingTables.add(mapping.auditTable.toLowerCase(Locale.ROOT));
 				created++;
 				log.info("Created Envers audit table {}.", mapping.auditTable);
+				try (Statement statement = connection.createStatement()) {
+					statement.execute(buildCreateRevIndexSql(mapping, quote));
+				}
+				catch (Exception e) {
+					log.warn("Could not create REV index on {}: {}", mapping.auditTable, e.getMessage());
+				}
 			}
 			catch (Exception e) {
 				log.warn("Could not create audit table {}: {}", mapping.auditTable, e.getMessage());
@@ -744,9 +750,10 @@ public class AuditBackfillDao {
 	
 	/**
 	 * Builds the CREATE TABLE statement for one audit table: all base columns (nullable), plus REV and
-	 * REVTYPE, with PRIMARY KEY (base PK columns, REV) — the same shape Envers' own DDL uses. No
-	 * defaults, no auto-increment, no unique indexes (a cloned unique index would break multiple
-	 * revisions of the same row) and no foreign keys.
+	 * REVTYPE, with PRIMARY KEY (base PK columns, REV). No defaults, no auto-increment, no unique
+	 * indexes (a cloned unique index would break multiple revisions of the same row) and no foreign
+	 * keys — unlike Envers' own DDL, whose REV foreign key gives it a REV index for free; the separate
+	 * statement from {@link #buildCreateRevIndexSql} replaces that index.
 	 */
 	String buildCreateAuditTableSql(TableMapping mapping, List<ColumnDefinition> baseColumns, List<String> basePkColumns,
 	        String revColumnType, String revTypeColumnType, String quote) {
@@ -765,6 +772,16 @@ public class AuditBackfillDao {
 		}
 		sql.append(")");
 		return sql.toString();
+	}
+	
+	/**
+	 * Builds the CREATE INDEX statement for the REV column. The composite primary key (base PK, REV)
+	 * cannot serve revision-only lookups such as getEntitiesModifiedInRevision, which filter on REV
+	 * without the base id; without this index those queries scan the whole audit table.
+	 */
+	String buildCreateRevIndexSql(TableMapping mapping, String quote) {
+		return "CREATE INDEX " + quoteIdentifier(mapping.auditTable + "_rev", quote) + " ON "
+		        + quoteIdentifier(mapping.auditTable, quote) + " (REV)";
 	}
 	
 	/** Reads the column definitions of a table from JDBC metadata; audit clones are always nullable. */

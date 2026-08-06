@@ -130,6 +130,9 @@ class AuditBackfillDaoIntegrationTest {
 			assertEquals(0, secondRun.getCreated());
 			assertTrue(secondRun.getMissingTables().isEmpty());
 			
+			// revision-only lookups filter on REV without the base id, so REV must lead an index
+			assertTrue(hasIndexLedByRev("test_book_AUD"), "expected an index with REV as its leading column");
+			
 			// audited write: entity plus a collection element, exercising the relation audit table
 			Integer bookId;
 			try (Session session = sessionFactory.openSession()) {
@@ -161,6 +164,22 @@ class AuditBackfillDaoIntegrationTest {
 				        .getSingleResult();
 				assertEquals(1, middleRows.intValue());
 			}
+		}
+	}
+	
+	private static boolean hasIndexLedByRev(String tableName) {
+		try (Session session = sessionFactory.openSession()) {
+			return session.doReturningWork(connection -> {
+				try (java.sql.ResultSet rs = connection.getMetaData().getIndexInfo(connection.getCatalog(), null, tableName,
+				    false, false)) {
+					while (rs.next()) {
+						if ("REV".equalsIgnoreCase(rs.getString("COLUMN_NAME")) && rs.getShort("ORDINAL_POSITION") == 1) {
+							return true;
+						}
+					}
+				}
+				return false;
+			});
 		}
 	}
 	

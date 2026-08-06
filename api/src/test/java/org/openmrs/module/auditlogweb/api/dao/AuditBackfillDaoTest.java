@@ -187,6 +187,14 @@ class AuditBackfillDaoTest {
 	}
 	
 	@Test
+	void shouldBuildCreateRevIndexSql() {
+		TableMapping mapping = new TableMapping("person", "person_audit");
+		
+		assertEquals("CREATE INDEX `person_audit_rev` ON `person_audit` (REV)", dao.buildCreateRevIndexSql(mapping, "`"));
+		assertEquals("CREATE INDEX person_audit_rev ON person_audit (REV)", dao.buildCreateRevIndexSql(mapping, ""));
+	}
+	
+	@Test
 	void shouldKeepOnlyMappingsWhoseBaseTableExists() {
 		TableMapping withBase = new TableMapping("role_privilege", "role_privilege_AUD");
 		TableMapping withoutBase = new TableMapping("Location_LocationAttribute", "Location_LocationAttribute_AUD");

@@ -40,7 +40,7 @@ public class AuditlogwebActivator extends BaseModuleActivator {
 			log.error("Creation of missing Envers audit tables failed", e);
 		}
 		try {
-			backfillService.syncAuditColumnsIfPlatformUpgraded();
+			backfillService.syncAuditColumnsIfVersionsChanged();
 		}
 		catch (Exception e) {
 			log.error("Envers audit table column sync failed", e);

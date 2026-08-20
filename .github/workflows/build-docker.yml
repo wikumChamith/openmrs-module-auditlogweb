@@ -1,0 +1,100 @@
+name: Build Docker Images
+
+# Publishes nightly-auditlog on pushes to main and on the nightly schedule,
+# and <version>-auditlog on the release tags created by release.yml (the
+# parent pom tags releases as the plain version, e.g. 1.1.0).
+on:
+  push:
+    branches: [main]
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  schedule:
+    # Nightly, so the "next" ESMs and nightly base images don't go stale.
+    - cron: '45 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: openmrs/openmrs-reference-application-3
+  DOCKER_IMAGE_TAG: ${{ github.ref_type == 'tag' && format('{0}-auditlog', github.ref_name) || 'nightly-auditlog' }}
+  DOCKER_IMAGE_PLATFORMS: linux/amd64,linux/arm64
+
+# Queue rather than cancel: a push landing mid-nightly (or vice versa) must
+# not cancel a run after one image pushed but before the other, which would
+# leave the frontend/backend tag pair mismatched.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Run Tests
+    if: github.repository_owner == 'openmrs'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up JDK
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 8
+          cache: maven
+
+      - name: Run tests
+        run: mvn test -B
+
+  build-and-publish-frontend:
+    name: Build and Publish the Frontend Image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: true
+          platforms: ${{ env.DOCKER_IMAGE_PLATFORMS }}
+          build-args: |
+            CACHE_BUST=${{ github.run_id }}
+          tags: |
+            ${{ env.IMAGE }}-frontend:${{ env.DOCKER_IMAGE_TAG }}
+
+  build-and-publish-backend:
+    name: Build and Publish the Backend Image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile.backend
+          push: true
+          platforms: ${{ env.DOCKER_IMAGE_PLATFORMS }}
+          tags: |
+            ${{ env.IMAGE }}-backend:${{ env.DOCKER_IMAGE_TAG }}

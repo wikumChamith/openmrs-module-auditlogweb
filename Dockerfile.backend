@@ -1,0 +1,21 @@
+# O3 backend with the auditlogweb module and the first-boot Envers schema wrapper.
+# Temurin 8 matches the JDK the release and CI builds compile with (the parent
+# pom uses source/target 1.8 without --release, so a newer JDK could link
+# against APIs missing at runtime on Java 8 hosts).
+# $BUILDPLATFORM: the omod is architecture-independent, so build it once on
+# the build host instead of re-compiling under QEMU for each target platform.
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-8 AS builder
+
+COPY . /build
+WORKDIR /build
+RUN --mount=type=cache,target=/root/.m2 mvn clean package -DskipTests -B
+
+FROM openmrs/openmrs-reference-application-3-backend:nightly
+
+COPY --from=builder /build/omod/target/auditlogweb-*.omod /openmrs/distribution/openmrs_modules/
+COPY --chmod=755 scripts/hbm2ddl-wrapper.sh /openmrs/hbm2ddl-wrapper.sh
+
+# Envers must be on for the module to do anything; overridable at runtime.
+ENV OMRS_EXTRA_HIBERNATE_INTEGRATION_ENVERS_ENABLED="true"
+
+CMD ["/bin/bash", "/openmrs/hbm2ddl-wrapper.sh"]

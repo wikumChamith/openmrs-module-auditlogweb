@@ -1,0 +1,20 @@
+# O3 frontend with @openmrs/esm-audit-log-app added to the standard RefApp SPA.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS build-spa
+
+RUN npm install --legacy-peer-deps --global openmrs@next
+
+# Placed after the CLI install on purpose: CACHE_BUST re-runs only the
+# assemble layer, re-resolving the "next" module versions while keeping the
+# openmrs CLI layer cached.
+ARG CACHE_BUST
+COPY spa-assemble-config.json /app/spa-assemble-config.json
+WORKDIR /app
+
+RUN openmrs assemble --mode config --config spa-assemble-config.json --target dist
+
+# Use the official O3 frontend image as the base — it has the correct
+# index.html (with SPA bootstrap), nginx config, and env var substitution.
+# Note the app shell comes from the base image while modules resolve at build
+# time, so the two can drift between base-image and module releases.
+FROM openmrs/openmrs-reference-application-3-frontend:nightly
+COPY --from=build-spa /app/dist /usr/share/nginx/html

@@ -2,21 +2,27 @@
 # .github/workflows/build-docker.yml).
 # Usage: cp .env.example .env (set passwords), then: docker compose up -d
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   gateway:
     # nightly to match the nightly bases of the frontend/backend images below.
     image: openmrs/openmrs-reference-application-3-gateway:${GATEWAY_TAG:-nightly}
     restart: "unless-stopped"
+    # backend is service_started (not healthy) on purpose: first boot takes
+    # long and the gateway serving 502s beats it not starting at all.
     depends_on:
-      - frontend
-      - backend
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_started
     ports:
       - "${GATEWAY_PORT:-80}:80"
-    logging: &logging
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *logging
 
   frontend:
     # Built by .github/workflows/build-docker.yml from Dockerfile.frontend
@@ -30,14 +36,16 @@ services:
       SPA_DEFAULT_LOCALE: ${SPA_DEFAULT_LOCALE:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
       timeout: 5s
+      retries: 5
     depends_on:
       - backend
     logging: *logging
 
   backend:
     # Built by .github/workflows/build-docker.yml from Dockerfile.backend
-    # (RefApp backend + auditlogweb module + first-boot Envers schema wrapper).
+    # (RefApp backend + auditlogweb module + Envers enabled).
     image: openmrs/openmrs-reference-application-3-backend:${BACKEND_TAG:-nightly-auditlog}
     restart: "unless-stopped"
     depends_on:

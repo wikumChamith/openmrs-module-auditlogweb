@@ -21,4 +21,8 @@ RUN openmrs assemble --mode config --config spa-assemble-config.json --target di
 # Note the app shell comes from the base image while modules resolve at build
 # time, so the two can drift between base-image and module releases.
 FROM openmrs/openmrs-reference-application-3-frontend:nightly
+# Drop the base image's app bundles first (the shell, fonts, and config files
+# live at the html root and survive): the overlay below brings its own set,
+# and stale copies of distro-removed apps would otherwise linger on disk.
+RUN rm -rf /usr/share/nginx/html/openmrs-esm-*
 COPY --from=build-spa /app/dist /usr/share/nginx/html

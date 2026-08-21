@@ -66,13 +66,16 @@ The images are built from this repo (`Dockerfile.backend`, `Dockerfile.frontend`
 and published to Docker Hub by the `build-docker.yml` workflow — the same setup
 as openmrs-module-chartsearchai. Pushes to `main` and a nightly schedule publish
 `openmrs/openmrs-reference-application-3-{backend,frontend}:nightly-auditlog`;
-release tags publish `<version>-auditlog` (e.g. `1.1.0-auditlog`) for pinned
-deployments. The dev compose override builds the images locally under separate
-tags, so it works before any image is published.
+release tags publish `<version>-auditlog` (e.g. `1.1.0-auditlog`), which pins
+the module version — the O3 base images, ESMs, and gateway still track the
+RefApp's moving `nightly`/`next` tags, so treat this stack as an
+evaluation/demo deployment rather than a fully pinned production install.
+The dev compose override builds the images locally under separate tags, so it
+works before any image is published.
 
 Prerequisites: Docker with the compose plugin.
 
-**Production:**
+**Run the published images (demo/evaluation):**
 ```
 cp .env.example .env       # then edit .env and set OMRS_DB_PASSWORD and MYSQL_ROOT_PASSWORD
 docker compose up -d
@@ -93,12 +96,17 @@ docker compose --env-file .env.dev -f docker-compose.yml -f docker-compose.dev.y
 ```
 Pass `--build` when the Dockerfiles change — compose only builds automatically
 when the image doesn't exist yet. (The frontend's module list is fetched from
-the RefApp distro at build time, with the audit-log app added.)
+the RefApp distro at build time, with the audit-log app added.) A compose
+error about the omod bind-mount path means `MODULE_VERSION` in `.env.dev` has
+drifted from the pom version.
 
 **Verify the audit schema** (uses the credentials from the container's own env):
 ```
 docker compose exec db sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SHOW TABLES LIKE \"%_AUD\"; SHOW TABLES LIKE \"revision_entity\";"'
 ```
+If tables are missing, check the backend log for `SchemaUpdate` errors — schema
+failures are logged, not fatal to startup. (On platforms built from core
+master/2.9+ the default audit suffix changes from `_AUD` to `_audit`.)
 
 **Stop / reset:**
 ```

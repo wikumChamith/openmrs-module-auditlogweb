@@ -16,9 +16,10 @@ COPY --from=builder /build/omod/target/auditlogweb-*.omod /openmrs/distribution/
 
 # The configuration the module's admin hint prescribes (messages.properties):
 # Envers on, and hbm2ddl.auto=update permanently so the Envers schema is
-# created before core's first audited write and converges with the audited
-# mappings on every boot (SchemaUpdate only ever adds). Both overridable at
-# runtime; set HBM2DDL to none when running multiple backend replicas
-# (concurrent DDL races).
+# created before core's first audited write and re-checked against the audited
+# mappings on each boot (SchemaUpdate only ever adds). Note SchemaUpdate logs
+# DDL failures and continues, so missing _AUD tables surface in the backend
+# log, not as a startup failure. Both overridable at runtime; set HBM2DDL to
+# none when running multiple backend replicas (concurrent DDL races).
 ENV OMRS_EXTRA_HIBERNATE_INTEGRATION_ENVERS_ENABLED="true"
 ENV OMRS_EXTRA_HIBERNATE_HBM2DDL_AUTO="update"

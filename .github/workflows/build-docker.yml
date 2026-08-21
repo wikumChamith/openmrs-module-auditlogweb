@@ -50,8 +50,10 @@ jobs:
           java-version: 8
           cache: maven
 
-      - name: Run tests
-        run: mvn test -B
+      # package, not test: the omod's unpack-dependencies step needs the api
+      # artifact packaged (MDEP-98), which the test phase never does.
+      - name: Build and run tests
+        run: mvn clean package -B
 
   build-frontend:
     name: Build the Frontend Image

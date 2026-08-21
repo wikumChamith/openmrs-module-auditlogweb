@@ -57,9 +57,10 @@ Running with Docker
 -------------------
 This repo ships a docker compose setup that runs the full O3 Reference Application
 (gateway, frontend with the audit-log app, backend with this module, MariaDB) with
-Hibernate Envers enabled. On the first boot a wrapper script runs Hibernate with
-`hbm2ddl.auto=update` so the Envers schema exists before the first audited write;
-every later boot runs without it and the module keeps the schema in sync.
+Hibernate Envers enabled. The backend image sets `hibernate.hbm2ddl.auto=update`
+(the configuration the module's admin hint prescribes) so the Envers schema is
+created before the first audited write and kept in step with the audited
+mappings on every boot.
 
 The images are built from this repo (`Dockerfile.backend`, `Dockerfile.frontend`)
 and published to Docker Hub by the `build-docker.yml` workflow — the same setup
@@ -90,8 +91,9 @@ new build (`up -d` alone won't restart an unchanged container):
 mvn clean package
 docker compose --env-file .env.dev -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate backend
 ```
-Pass `--build` when the Dockerfiles or `spa-assemble-config.json` change —
-compose only builds automatically when the image doesn't exist yet.
+Pass `--build` when the Dockerfiles change — compose only builds automatically
+when the image doesn't exist yet. (The frontend's module list is fetched from
+the RefApp distro at build time, with the audit-log app added.)
 
 **Verify the audit schema** (uses the credentials from the container's own env):
 ```
@@ -103,5 +105,3 @@ docker compose exec db sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_
 docker compose down       # stop; data survives in the volumes
 docker compose down -v    # wipe everything for a fresh start
 ```
-Always reset both volumes together (`down -v`): the database and the first-boot
-marker on the OpenMRS data volume must stay in sync.

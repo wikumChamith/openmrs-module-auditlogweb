@@ -5,7 +5,7 @@
 # After a module rebuild (mvn clean package), restart the backend so the file
 # mount picks up the new build (up -d alone won't restart an unchanged container):
 #   docker compose --env-file .env.dev -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate backend
-# Pass --build after changing the Dockerfiles or spa-assemble-config.json.
+# Pass --build after changing the Dockerfiles.
 
 services:
   frontend:
@@ -20,10 +20,10 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     volumes:
-      # Update the filename when the pom version changes.
+      # MODULE_VERSION comes from .env.dev; keep it in step with the pom version.
       - type: bind
-        source: ./omod/target/auditlogweb-1.1.0-SNAPSHOT.omod
-        target: /openmrs/distribution/openmrs_modules/auditlogweb-1.1.0-SNAPSHOT.omod
+        source: ./omod/target/auditlogweb-${MODULE_VERSION}.omod
+        target: /openmrs/distribution/openmrs_modules/auditlogweb-${MODULE_VERSION}.omod
         read_only: true
         bind:
           create_host_path: false

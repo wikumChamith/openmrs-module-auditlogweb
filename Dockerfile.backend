@@ -1,4 +1,4 @@
-# O3 backend with the auditlogweb module and the first-boot Envers schema wrapper.
+# O3 backend with the auditlogweb module and Envers enabled.
 # Temurin 8 matches the JDK the release and CI builds compile with (the parent
 # pom uses source/target 1.8 without --release, so a newer JDK could link
 # against APIs missing at runtime on Java 8 hosts).
@@ -13,9 +13,12 @@ RUN --mount=type=cache,target=/root/.m2 mvn clean package -DskipTests -B
 FROM openmrs/openmrs-reference-application-3-backend:nightly
 
 COPY --from=builder /build/omod/target/auditlogweb-*.omod /openmrs/distribution/openmrs_modules/
-COPY --chmod=755 scripts/hbm2ddl-wrapper.sh /openmrs/hbm2ddl-wrapper.sh
 
-# Envers must be on for the module to do anything; overridable at runtime.
+# The configuration the module's admin hint prescribes (messages.properties):
+# Envers on, and hbm2ddl.auto=update permanently so the Envers schema is
+# created before core's first audited write and converges with the audited
+# mappings on every boot (SchemaUpdate only ever adds). Both overridable at
+# runtime; set HBM2DDL to none when running multiple backend replicas
+# (concurrent DDL races).
 ENV OMRS_EXTRA_HIBERNATE_INTEGRATION_ENVERS_ENABLED="true"
-
-CMD ["/bin/bash", "/openmrs/hbm2ddl-wrapper.sh"]
+ENV OMRS_EXTRA_HIBERNATE_HBM2DDL_AUTO="update"

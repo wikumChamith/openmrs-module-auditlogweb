@@ -3,12 +3,16 @@ FROM --platform=$BUILDPLATFORM node:24-alpine AS build-spa
 
 RUN npm install --legacy-peer-deps --global openmrs@next
 
-# Placed after the CLI install on purpose: CACHE_BUST re-runs only the
-# assemble layer, re-resolving the "next" module versions while keeping the
-# openmrs CLI layer cached.
+# Placed after the CLI install on purpose: CACHE_BUST re-runs only the layers
+# below, re-resolving the distro config and the "next" module versions while
+# keeping the openmrs CLI layer cached.
 ARG CACHE_BUST
-COPY spa-assemble-config.json /app/spa-assemble-config.json
+
+# Derive the module list from the distro at build time instead of vendoring a
+# copy that would drift silently as the distro adds or removes apps.
+ADD https://raw.githubusercontent.com/openmrs/openmrs-distro-referenceapplication/main/frontend/spa-assemble-config.json /app/distro-config.json
 WORKDIR /app
+RUN node -e "const c=require('./distro-config.json'); c.frontendModules['@openmrs/esm-audit-log-app']='next'; require('fs').writeFileSync('spa-assemble-config.json', JSON.stringify(c,null,2))"
 
 RUN openmrs assemble --mode config --config spa-assemble-config.json --target dist
 

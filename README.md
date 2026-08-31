@@ -108,6 +108,13 @@ If tables are missing, check the backend log for `SchemaUpdate` errors — schem
 failures are logged, not fatal to startup. (On platforms built from core
 master/2.9+ the default audit suffix changes from `_AUD` to `_audit`.)
 
+Note the backend log always carries ERROR lines from the module's audit-column
+sweep: with `hbm2ddl.auto=update`, most `_AUD` tables differ from their base
+tables in column type/width (SchemaUpdate builds them from the entity mappings
+while the base tables come from Liquibase), and the sweep logs each divergence
+on every boot. These errors are expected with this configuration and do not
+block auditing.
+
 **Stop / reset:**
 ```
 docker compose down       # stop; data survives in the volumes

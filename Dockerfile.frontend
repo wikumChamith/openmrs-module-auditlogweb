@@ -34,14 +34,19 @@ RUN node /app/precompress-spa.mjs /app/dist
 FROM openmrs/openmrs-reference-application-3-frontend:nightly
 # Before the copy: drop the base image's app bundles (the shell, fonts, and
 # config files live at the html root and survive; stale copies of
-# distro-removed apps would otherwise linger on disk) and ALL of its
-# precompressed siblings. The siblings matter most: nginx prefers <file>.br /
-# <file>.gz over the plain file, so a stale sibling beside a replaced
-# importmap.json or routes.registry.json would hand every browser the base's
-# module list — which never names the audit-log app — while a plain curl
+# distro-removed apps would otherwise linger on disk), then drop the
+# precompressed siblings of just the files the copy replaces. nginx prefers
+# <file>.br / <file>.gz over the plain file, so a stale sibling beside a
+# replaced importmap.json or routes.registry.json would hand every browser the
+# base's module list, which never names the audit-log app, while a plain curl
 # (no Accept-Encoding) still reads the fresh file and looks healthy.
-RUN rm -rf /usr/share/nginx/html/openmrs-esm-* && \
-    find /usr/share/nginx/html \( -name '*.gz' -o -name '*.br' \) -delete
+# Driving that off the assembly's own file list, rather than deleting every
+# sibling in the tree, keeps the base-only files compressed: nothing here
+# rebuilds them and this stage has no brotli compressor.
+RUN rm -rf /usr/share/nginx/html/openmrs-esm-*
+RUN --mount=type=bind,from=build-spa,source=/app/dist,target=/dist \
+    cd /dist && find . -type f ! -name '*.gz' ! -name '*.br' \
+      -exec rm -f "/usr/share/nginx/html/{}.gz" "/usr/share/nginx/html/{}.br" \;
 COPY --from=build-spa /app/dist /usr/share/nginx/html
 
 # Fail the build unless the two files that decide whether the ESM loads name

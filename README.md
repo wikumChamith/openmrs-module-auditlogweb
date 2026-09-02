@@ -100,6 +100,11 @@ the RefApp distro at build time, with the audit-log app added.) A compose
 error about the omod bind-mount path means `MODULE_VERSION` in `.env.dev` has
 drifted from the pom version.
 
+Every compose command in this flow needs `--env-file .env.dev` as well, the
+Verify and Stop / reset blocks below included; without it compose cannot
+interpolate the passwords the base file requires and exits before reaching
+Docker.
+
 **Verify the audit schema** (uses the credentials from the container's own env):
 ```
 docker compose exec db sh -c 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "SHOW TABLES LIKE \"%_AUD\"; SHOW TABLES LIKE \"revision_entity\";"'

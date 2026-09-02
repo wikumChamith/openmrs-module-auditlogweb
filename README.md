@@ -79,7 +79,7 @@ Prerequisites: Docker with the compose plugin.
 ```
 cp .env.example .env       # then edit .env and set OMRS_DB_PASSWORD and MYSQL_ROOT_PASSWORD
 docker compose up -d
-docker compose logs -f backend   # first boot takes a few minutes
+docker compose logs -f backend   # first boot can take 30+ minutes
 ```
 Open http://localhost (admin/Admin123; change the port with `GATEWAY_PORT` in `.env`).
 
